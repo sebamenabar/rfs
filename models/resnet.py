@@ -110,6 +110,10 @@ class BasicBlock(nn.Module):
         if self.use_se:
             self.se = SELayer(planes, 4)
 
+        print(f"Inplanes: {inplanes}, planes: {planes}")
+        print("Dropblock:", drop_block)
+        print("Drop rate:", drop_rate)
+
     def forward(self, x):
         self.num_batches_tracked += 1
 
@@ -149,7 +153,7 @@ class BasicBlock(nn.Module):
 class ResNet(nn.Module):
 
     def __init__(self, block, n_blocks, keep_prob=1.0, avg_pool=False, drop_rate=0.0,
-                 dropblock_size=5, num_classes=-1, use_se=False):
+                 dropblock_size=5, use_dropblock=False, num_classes=-1, use_se=False):
         super(ResNet, self).__init__()
 
         self.inplanes = 3
@@ -159,9 +163,9 @@ class ResNet(nn.Module):
         self.layer2 = self._make_layer(block, n_blocks[1], 160,
                                        stride=2, drop_rate=drop_rate)
         self.layer3 = self._make_layer(block, n_blocks[2], 320,
-                                       stride=2, drop_rate=drop_rate, drop_block=True, block_size=dropblock_size)
+                                       stride=2, drop_rate=drop_rate, drop_block=use_dropblock, block_size=dropblock_size)
         self.layer4 = self._make_layer(block, n_blocks[3], 640,
-                                       stride=2, drop_rate=drop_rate, drop_block=True, block_size=dropblock_size)
+                                       stride=2, drop_rate=drop_rate, drop_block=use_dropblock, block_size=dropblock_size)
         if avg_pool:
             # self.avgpool = nn.AvgPool2d(5, stride=1)
             self.avgpool = nn.AdaptiveAvgPool2d(1)
