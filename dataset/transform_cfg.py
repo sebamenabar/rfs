@@ -17,7 +17,7 @@ transform_A = [
             transforms.RandomCrop(84, padding=8),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
             transforms.RandomHorizontalFlip(),
-            lambda x: np.asarray(x),
+            # lambda x: np.asarray(x),
             transforms.ToTensor(),
             normalize,
         ]
@@ -34,7 +34,7 @@ transform_B = [
             lambda x: Image.fromarray(x),
             transforms.RandomResizedCrop(84, scale=(0.2, 1.0)),
             transforms.RandomHorizontalFlip(),
-            lambda x: np.asarray(x),
+            # lambda x: np.asarray(x),
             transforms.ToTensor(),
             transforms.Normalize(
                 np.array([x / 255.0 for x in [125.3, 123.0, 113.9]]),
@@ -99,7 +99,7 @@ transform_D = [
             transforms.RandomCrop(32, padding=4),
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
             transforms.RandomHorizontalFlip(),
-            lambda x: np.asarray(x),
+            # lambda x: np.asarray(x),
             transforms.ToTensor(),
             normalize_cifar100,
         ]

@@ -5,7 +5,14 @@ from . import model_dict
 
 
 def create_model(
-    name, n_cls, dataset="miniImageNet", drop_rate=0.0, use_dropblock=False
+    name,
+    n_cls,
+    dataset="miniImageNet",
+    drop_rate=0.0,
+    use_dropblock=False,
+    track_stats=True,
+    initializer="kaiming_normal",
+    weight_norm=False,
 ):
     """create model by name"""
     if dataset == "miniImageNet" or dataset == "tieredImageNet":
@@ -21,11 +28,18 @@ def create_model(
                 use_dropblock=use_dropblock,
                 dropblock_size=5,
                 num_classes=n_cls,
+                track_stats=track_stats,
+                initializer=initializer,
             )
         elif name.startswith("wrn"):
             model = model_dict[name](num_classes=n_cls)
         elif name.startswith("convnet"):
-            model = model_dict[name](num_classes=n_cls)
+            model = model_dict[name](
+                num_classes=n_cls,
+                track_stats=track_stats,
+                initializer=initializer,
+                weight_norm=weight_norm,
+            )
         else:
             raise NotImplementedError(
                 "model {} not supported in dataset {}:".format(name, dataset)
