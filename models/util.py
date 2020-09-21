@@ -13,6 +13,8 @@ def create_model(
     track_stats=True,
     initializer="kaiming_normal",
     weight_norm=False,
+    activation="leaky_relu",
+    normalization="bn",
 ):
     """create model by name"""
     if dataset == "miniImageNet" or dataset == "tieredImageNet":
@@ -30,6 +32,8 @@ def create_model(
                 num_classes=n_cls,
                 track_stats=track_stats,
                 initializer=initializer,
+                activation=activation,
+                normalization=normalization,
             )
         elif name.startswith("wrn"):
             model = model_dict[name](num_classes=n_cls)

@@ -144,6 +144,8 @@ def parse_option():
     parser.add_argument("--track_stats", default=False, action="store_true")
     parser.add_argument("--reset_head", choices=["none", "zero"])
     parser.add_argument("--weight_norm", default=0, choices=[0, 1], type=int)
+    parser.add_argument("--activation", default="relu", choices=["relu", "leaky_relu"])
+    parser.add_argument("--normalization", default="bn", choices=["bn", "affine"])
 
     parser.add_argument(
         "--no_aug_keep_original",
@@ -165,7 +167,7 @@ def parse_option():
 
     opt = parser.parse_args()
     # opt.dropblock = not opt.no_dropblock
-    opt.data_aug = opt.augment != "none"
+    opt.data_aug = False # hard code
 
     # if opt.dataset == "CIFAR-FS" or opt.dataset == "FC100":
     #     opt.transform = "D"
@@ -183,7 +185,6 @@ def parse_option():
     # else:
     #     opt.data_root = "{}/{}".format(opt.data_root, opt.dataset)
 
-
     # iterations = opt.lr_decay_epochs.split(",")
     # opt.lr_decay_epochs = list([])
     # for it in iterations:
@@ -192,17 +193,22 @@ def parse_option():
     print(opt.lr_decay_epochs)
 
     # opt.model_name = "{}_{}_lr_{}_decay_{}_trans_{}_bsz_{}".format(
-    opt.model_name = "maml_{}_{}_olr_{}_ilr_{}_aug_{}_bsz_{}_reset_{}_{}".format(
+    opt.model_name = "maml_{}_{}_olr_{}_ilr_{}_{}w_{}s_{}qs_aug_{}_bsz_{}_reset_{}_{}_{}_{}".format(
         opt.model,
         opt.dataset,
         opt.learning_rate,
         opt.inner_lr,
+        opt.n_ways,
+        opt.n_shots,
+        opt.n_queries,
         # opt.weight_decay,
         opt.augment,
         opt.batch_size,
         opt.reset_head,
         opt.initializer,
+        opt.activation,
         # opt.epochs,
+        opt.normalization,
     )
 
     if opt.weight_norm == 1:
@@ -247,7 +253,7 @@ def main():
         train_trans, test_trans = transforms_options[opt.transform]
 
         if opt.augment == "none":
-            train_train_trans = train_test_trans  = test_trans
+            train_train_trans = train_test_trans = test_trans
         elif opt.augment == "all":
             train_train_trans = train_test_trans = train_trans
         elif opt.augment == "spt":
@@ -261,7 +267,7 @@ def main():
         print(train_train_trans)
         print("qry trans")
         print(train_test_trans)
-        
+
         meta_train_dataset = MetaImageNet(
             args=opt,
             partition="train",
@@ -269,7 +275,7 @@ def main():
             test_transform=train_test_trans,
             fname="miniImageNet_category_split_train_phase_%s.pickle",
             fix_seed=False,
-            n_test_runs=10000000, # big number to never stop
+            n_test_runs=10000000,  # big number to never stop
         )
         meta_trainloader = DataLoader(
             meta_train_dataset,
@@ -308,7 +314,11 @@ def main():
         opt.track_stats,
         opt.initializer,
         opt.weight_norm,
+        activation=opt.activation,
+        normalization=opt.normalization,
     )
+
+    print(model)
 
     criterion = nn.CrossEntropyLoss()
 
@@ -345,6 +355,7 @@ def main():
     )
     comet_logger.set_name(opt.model_name)
     comet_logger.log_parameters(vars(opt))
+    comet_logger.set_model_graph(str(model))
 
     if opt.cosine:
         eta_min = opt.learning_rate * opt.cosine_factor
@@ -408,7 +419,9 @@ def main():
 
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
-                print(f"New best validation accuracy {val_acc.item()} saving checkpoints\n")
+                print(
+                    f"New best validation accuracy {val_acc.item()} saving checkpoints\n"
+                )
                 # print(val_acc.item())
 
                 torch.save(
@@ -512,6 +525,39 @@ def main():
     }
     save_file = os.path.join(opt.save_folder, "{}_last.pth".format(opt.model))
     torch.save(state, save_file)
+
+
+class MetaLearner(nn.Module):
+    def __init__(self, encoder, classifier, outer_opt, inner_opt):
+        super().__init__()
+        self.encoder = encoder
+        self.classifier = classifier
+        self.inner_opt = inner_opt
+        self.outer_opt = outer_opt
+
+    def forward(
+        self,
+        x_spt,
+        y_spt,
+        x_qry,
+        y_qry,
+        reset_head="none",
+        cls_indexes=None,
+        num_steps=5,
+    ):
+        return train_step(
+            self.encoder,
+            self.classifier,
+            self.outer_opt,
+            self.inner_opt,
+            x_spt,
+            y_spt,
+            x_qry,
+            y_qry,
+            reset_head,
+            cls_indexes,
+            num_steps,
+        )
 
 
 def train_step(

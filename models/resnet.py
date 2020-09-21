@@ -71,7 +71,8 @@ class DropBlock(nn.Module):
 
         batch_size, channels, height, width = mask.shape
         # print ("mask", mask[0][0])
-        non_zero_idxs = mask.nonzero()
+        # non_zero_idxs = mask.nonzero()
+        non_zero_idxs = torch.nonzero(mask)
         nr_blocks = non_zero_idxs.shape[0]
 
         offsets = (
@@ -114,6 +115,18 @@ class DropBlock(nn.Module):
         block_mask = 1 - padded_mask  # [:height, :width]
         return block_mask
 
+class Affine(nn.Module):
+    def __init__(self, num_features):
+        super().__init__()
+        self.num_features = num_features
+        self.weight = nn.Parameter(torch.ones(1, num_features, 1, 1), requires_grad=True)
+        self.bias = nn.Parameter(torch.zeros(1, num_features, 1, 1), requires_grad=True)
+
+    def forward(self, x):
+        # print(x.size())
+        # print(self.weight.size())
+        # print(self.bias.size())
+        return (x * self.weight) + self.bias
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -129,15 +142,27 @@ class BasicBlock(nn.Module):
         block_size=1,
         use_se=False,
         track_stats=True,
+        activation="leaky_relu",
+        normalization="bn",
     ):
         super(BasicBlock, self).__init__()
         self.conv1 = conv3x3(inplanes, planes)
-        self.bn1 = nn.BatchNorm2d(planes, track_running_stats=track_stats)
-        self.relu = nn.LeakyReLU(0.1)
+
+        if normalization == "bn":
+            norm = lambda planes: nn.BatchNorm2d(planes, track_running_stats=track_stats)
+        elif normalization == "affine":
+            norm = lambda planes: Affine(planes)
+
+        self.bn1 = norm(planes)
+
+        if activation == "leaky_relu":
+            self.relu = nn.LeakyReLU(0.1)
+        else:
+            self.relu = nn.ReLU()
         self.conv2 = conv3x3(planes, planes)
-        self.bn2 = nn.BatchNorm2d(planes, track_running_stats=track_stats)
+        self.bn2 = norm(planes)
         self.conv3 = conv3x3(planes, planes)
-        self.bn3 = nn.BatchNorm2d(planes, track_running_stats=track_stats)
+        self.bn3 = norm(planes)
         self.maxpool = nn.MaxPool2d(stride)
         self.downsample = downsample
         self.stride = stride
@@ -154,6 +179,7 @@ class BasicBlock(nn.Module):
         print("Dropblock:", drop_block)
         print("Drop rate:", drop_rate)
         print("Track stats:", track_stats)
+        print("Activation:", activation)
 
     def forward(self, x):
         self.num_batches_tracked += 1
@@ -215,6 +241,8 @@ class ResNet(nn.Module):
         use_se=False,
         track_stats=True,
         initializer="kaiming_normal",
+        activation="leaky_relu",
+        normalization="bn",
     ):
         super(ResNet, self).__init__()
 
@@ -227,6 +255,8 @@ class ResNet(nn.Module):
             stride=2,
             drop_rate=drop_rate,
             track_stats=track_stats,
+            activation=activation,
+            normalization=normalization,
         )
         self.layer2 = self._make_layer(
             block,
@@ -235,6 +265,8 @@ class ResNet(nn.Module):
             stride=2,
             drop_rate=drop_rate,
             track_stats=track_stats,
+            activation=activation,
+            normalization=normalization,
         )
         self.layer3 = self._make_layer(
             block,
@@ -245,6 +277,8 @@ class ResNet(nn.Module):
             drop_block=use_dropblock,
             block_size=dropblock_size,
             track_stats=track_stats,
+            activation=activation,
+            normalization=normalization,
         )
         self.layer4 = self._make_layer(
             block,
@@ -255,6 +289,8 @@ class ResNet(nn.Module):
             drop_block=use_dropblock,
             block_size=dropblock_size,
             track_stats=track_stats,
+            activation=activation,
+            normalization=normalization,
         )
         if avg_pool:
             # self.avgpool = nn.AvgPool2d(5, stride=1)
@@ -269,7 +305,7 @@ class ResNet(nn.Module):
 
                 if initializer == "kaiming_normal":
                     nn.init.kaiming_normal_(
-                        m.weight, mode="fan_out", nonlinearity="leaky_relu"
+                        m.weight, mode="fan_out", nonlinearity=activation,
                     )
                 elif initializer == "glorot_uniform":
                     nn.init.xavier_uniform_(m.weight)
@@ -292,10 +328,18 @@ class ResNet(nn.Module):
         drop_block=False,
         block_size=1,
         track_stats=True,
+        activation="leaky_relu",
+        normalization="bn",
     ):
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
             print("Layer downsample track stats:", track_stats)
+            if normalization == "bn":
+                norm = nn.BatchNorm2d(
+                    planes * block.expansion, track_running_stats=track_stats
+                )
+            elif normalization == "affine":
+                norm = Affine(planes * block.expansion)
             downsample = nn.Sequential(
                 nn.Conv2d(
                     self.inplanes,
@@ -304,9 +348,7 @@ class ResNet(nn.Module):
                     stride=1,
                     bias=False,
                 ),
-                nn.BatchNorm2d(
-                    planes * block.expansion, track_running_stats=track_stats
-                ),
+                norm,
             )
 
         layers = []
@@ -321,6 +363,8 @@ class ResNet(nn.Module):
                 block_size,
                 self.use_se,
                 track_stats=track_stats,
+                activation=activation,
+                normalization=normalization,
             )
         else:
             layer = block(
@@ -331,6 +375,8 @@ class ResNet(nn.Module):
                 drop_rate,
                 self.use_se,
                 track_stats=track_stats,
+                activation=activation,
+                normalization=normalization,
             )
         layers.append(layer)
         self.inplanes = planes * block.expansion
@@ -345,6 +391,8 @@ class ResNet(nn.Module):
                     block_size=block_size,
                     use_se=self.use_se,
                     track_stats=track_stats,
+                    activation=activation,
+                    normalization=normalization,
                 )
             else:
                 layer = block(
@@ -353,6 +401,8 @@ class ResNet(nn.Module):
                     drop_rate=drop_rate,
                     use_se=self.use_se,
                     track_stats=track_stats,
+                    activation=activation,
+                    normalization=normalization,
                 )
             layers.append(layer)
 
