@@ -6,7 +6,7 @@ import time
 from .util import AverageMeter, accuracy
 
 
-def validate(val_loader, model, criterion, opt):
+def validate(val_loader, model, criterion, opt=None, print_freq=None):
     """One epoch validation"""
     batch_time = AverageMeter()
     losses = AverageMeter()
@@ -15,6 +15,8 @@ def validate(val_loader, model, criterion, opt):
 
     # switch to evaluate mode
     model.eval()
+    if print_freq is None:
+        print_freq = opt.print_freq
 
     with torch.no_grad():
         end = time.time()
@@ -39,7 +41,7 @@ def validate(val_loader, model, criterion, opt):
             batch_time.update(time.time() - end)
             end = time.time()
 
-            if idx % opt.print_freq == 0:
+            if idx % print_freq == 0:
                 print('Test: [{0}/{1}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                       'Loss {loss.val:.4f} ({loss.avg:.4f})\t'

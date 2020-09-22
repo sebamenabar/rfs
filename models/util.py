@@ -43,6 +43,7 @@ def create_model(
                 track_stats=track_stats,
                 initializer=initializer,
                 weight_norm=weight_norm,
+                normalization=normalization,
             )
         else:
             raise NotImplementedError(

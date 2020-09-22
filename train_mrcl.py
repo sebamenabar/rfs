@@ -9,7 +9,8 @@ from comet_ml import Experiment
 import higher
 from tqdm import tqdm
 
-import tensorboard_logger as tb_logger
+# import tensorboard_logger as tb_logger
+from tensorboardX import SummaryWriter
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -28,6 +29,7 @@ from util import adjust_learning_rate, accuracy, AverageMeter
 
 import numpy as np
 from eval.meta_eval import meta_test
+from eval.cls_eval import validate
 
 
 def parse_option():
@@ -41,12 +43,15 @@ def parse_option():
         "--print_freq", type=int, default=50, help="meta-eval frequency"
     )
     parser.add_argument("--batch_size", type=int, default=4, help="batch_size")
+    parser.add_argument(
+        "--sup_val_batch_size", type=int, default=128, help="batch_size"
+    )
     parser.add_argument("--apply_every", type=int, default=1)
     parser.add_argument(
         "--num_workers", type=int, default=8, help="num of workers to use"
     )
     parser.add_argument(
-        "--num_steps", type=int, default=20000, help="number of training steps"
+        "--num_steps", type=int, default=30000, help="number of training steps"
     )
 
     # optimization
@@ -153,13 +158,16 @@ def parse_option():
         default="kaiming_normal",
         choices=["glorot_uniform", "kaiming_normal"],
     )
+    parser.add_argument("--learn_lr", default=False, action="store_true")
     parser.add_argument("--track_stats", default=False, action="store_true")
     parser.add_argument("--reset_head", choices=["zero", "kaiming", "glorot"])
     parser.add_argument("--weight_norm", default=0, choices=[0, 1], type=int)
     parser.add_argument(
         "--activation", default="leaky_relu", choices=["relu", "leaky_relu"]
     )
-    parser.add_argument("--normalization", default="bn", choices=["bn", "affine"])
+    parser.add_argument(
+        "--normalization", default="bn", choices=["bn", "affine", "instance", "layer"]
+    )
 
     parser.add_argument(
         "--no_aug_keep_original",
@@ -230,6 +238,9 @@ def parse_option():
 
     if opt.cosine:
         opt.model_name = "{}_cosine_{}".format(opt.model_name, opt.cosine_factor)
+
+    if opt.learn_lr:
+        opt.model_name = "{}_llr".format(opt.model_name)
 
     # if opt.adam:
     #     opt.model_name = "{}_useAdam".format(opt.model_name)
@@ -344,6 +355,14 @@ def main():
             num_workers=opt.num_workers,
             pin_memory=True,
         )
+        val_loader = DataLoader(
+            ImageNet(args=opt, partition="val", transform=test_trans),
+            batch_size=opt.sup_val_batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=opt.num_workers,
+            pin_memory=True,
+        )
         # if opt.use_trainval:
         #     n_cls = 80
         # else:
@@ -376,7 +395,7 @@ def main():
 
     print(model)
 
-    # criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss()
 
     if torch.cuda.is_available():
         print(torch.cuda.get_device_name())
@@ -384,25 +403,28 @@ def main():
         # if opt.n_gpu > 1:
         #     model = nn.DataParallel(model)
         model = model.to(device)
-        # criterion = criterion.to(device)
+        criterion = criterion.to(device)
         cudnn.benchmark = True
     else:
         device = torch.device("cpu")
 
     print("Learning rate")
     print(opt.learning_rate)
+    print("Inner Learning rate")
+    print(opt.inner_lr)
+    if opt.learn_lr:
+        print("Optimizing learning rate")
+    inner_lr = nn.Parameter(torch.tensor(opt.inner_lr), requires_grad=opt.learn_lr)
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        list(model.parameters()) + [inner_lr] if opt.learn_lr else model.parameters(),
         lr=opt.learning_rate,
     )
     # classifier = model.classifier()
-    print("Inner Learning rate")
-    print(opt.inner_lr)
     inner_opt = torch.optim.SGD(
         model.classifier.parameters(),
         lr=opt.inner_lr,
     )
-    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    logger = SummaryWriter(logdir=opt.tb_folder, flush_secs=10, comment=opt.model_name)
     comet_logger = Experiment(
         api_key=os.environ["COMET_API_KEY"],
         project_name=opt.comet_project_name,
@@ -426,7 +448,7 @@ def main():
     pbar = tqdm(
         range(1, opt.num_steps + 1),
         miniters=opt.print_freq,
-        mininterval=5,
+        mininterval=3,
         maxinterval=30,
         ncols=0,
     )
@@ -464,7 +486,7 @@ def main():
                 model.classifier,
                 None,
                 # inner_opt,
-                opt.inner_lr,
+                inner_lr,
                 x_spt,
                 y_spt,
                 x_qry,
@@ -493,6 +515,7 @@ def main():
 
         optimizer.step()
         optimizer.zero_grad()
+        inner_lr.data.clamp_(min=0.001)
 
         if opt.cosine:
             scheduler.step()
@@ -501,25 +524,39 @@ def main():
                 iter(meta_valloader),
                 model,
                 model.classifier,
-                inner_opt,
+                torch.optim.SGD(model.classifier.parameters(), lr=inner_lr.item()),
                 num_inner_steps=opt.num_inner_steps_test,
                 device=device,
             )
             val_acc_feat, val_std_feat = meta_test(
-                model, meta_valloader, use_logit=False
+                model,
+                meta_valloader,
+                use_logit=False,
             )
 
             val_acc = val_info["outer"]["acc"].cpu()
             val_loss = val_info["outer"]["loss"].cpu()
 
+            sup_acc, sup_acc_top5, sup_loss = validate(
+                val_loader,
+                model,
+                criterion,
+                print_freq=100000000,
+            )
+            sup_acc = sup_acc.item()
+            sup_acc_top5 = sup_acc_top5.item()
+
             print(f"\nValidation step {step}")
             print(f"MAML 5-way-5-shot accuracy: {val_acc.item()}")
             print(f"LR 5-way-5-shot accuracy: {val_acc_feat}+-{val_std_feat}")
+            print(
+                f"Supervised accuracy: Acc@1: {sup_acc} Acc@5: {sup_acc_top5} Loss: {sup_loss}"
+            )
 
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
+            if val_acc_feat > best_val_acc:
+                best_val_acc = val_acc_feat
                 print(
-                    f"New best validation accuracy {val_acc.item()} saving checkpoints\n"
+                    f"New best validation accuracy {best_val_acc.item()} saving checkpoints\n"
                 )
                 # print(val_acc.item())
 
@@ -534,6 +571,9 @@ def main():
                         "val_acc": val_acc,
                         "val_loss": val_loss,
                         "val_acc_lr": val_acc_feat,
+                        "sup_acc": sup_acc,
+                        "sup_acc_top5": sup_acc_top5,
+                        "sup_loss": sup_loss,
                     },
                     os.path.join(opt.save_folder, "{}_best.pth".format(opt.model)),
                 )
@@ -543,14 +583,20 @@ def main():
                     fol=val_loss,
                     foa=val_acc,
                     acc_lr=val_acc_feat,
+                    sup_acc=sup_acc,
+                    sup_acc_top5=sup_acc_top5,
+                    sup_loss=sup_loss,
                 ),
                 step=step,
                 prefix="val",
             )
 
-            logger.log_value("val_acc", val_acc, step)
-            logger.log_value("val_loss", val_loss, step)
-            logger.log_value("val_acc_lr", val_acc_feat, step)
+            logger.add_scalar("val_acc", val_acc, step)
+            logger.add_scalar("val_loss", val_loss, step)
+            logger.add_scalar("val_acc_lr", val_acc_feat, step)
+            logger.add_scalar("sup_acc", sup_acc, step)
+            logger.add_scalar("sup_acc_top5", sup_acc_top5, step)
+            logger.add_scalar("sup_loss", sup_loss, step)
 
         if (step == 1) or (step % opt.eval_freq == 0) or (step % opt.print_freq == 0):
 
@@ -576,8 +622,13 @@ def main():
                 prefix="train",
             )
 
-            logger.log_value("train_acc", info["foa"], step)
-            logger.log_value("train_loss", info["fol"], step)
+            logger.add_scalar("train_acc", tfoa.item(), step)
+            logger.add_scalar("train_loss", tfol.item(), step)
+            logger.add_scalar("train_ioa", tioa, step)
+            logger.add_scalar("train_iil", tiil, step)
+            logger.add_scalar("train_fil", tfil, step)
+            logger.add_scalar("train_iia", tiia, step)
+            logger.add_scalar("train_fia", tfia, step)
 
             pbar.set_postfix(
                 # iol=f"{info['iol'].item():.2f}",
@@ -590,6 +641,8 @@ def main():
                 vl=f"{val_loss.item():.2f}",
                 va=f"{val_acc.item():.2f}",
                 valr=f"{val_acc_feat:.2f}",
+                lr=f"{inner_lr.item():.4f}",
+                vsa=f"{sup_acc:.2f}",
                 # iil=f"{info['iil'].item():.2f}",
                 # fil=f"{info['fil'].item():.2f}",
                 # iia=f"{info['iia'].item():.2f}",
@@ -684,35 +737,35 @@ def train_step(
         # print(fia)
         # print(fil)
 
-        inner_opt = torch.optim.SGD(classifier.parameters(), lr=inner_opt_lr)
+        inner_opt = torch.optim.SGD(
+            classifier.parameters(), lr=0.1
+        )  # override should set lr
 
         with higher.innerloop_ctx(
-            classifier, inner_opt, copy_initial_weights=False,
+            classifier,
+            inner_opt,
+            copy_initial_weights=False, # according to higher docs
+            override={"lr": [inner_opt_lr]},
         ) as (fmodel, diffopt):
-
 
             cls_idxs = torch.unique(y_spt[task_num])
 
             for cls_idx in cls_idxs:
                 if reset_head == "zero":
                     # print("resetting zero")
-                    torch.nn.init.zeros_(fmodel._parameters["weight"][cls_idx].unsqueeze(0))
+                    torch.nn.init.zeros_(
+                        fmodel._parameters["weight"][cls_idx].unsqueeze(0)
+                    )
                 elif reset_head == "kaiming":
-                    torch.nn.init.kaiming_normal_(fmodel._parameters["weight"][cls_idx].unsqueeze(0))
+                    torch.nn.init.kaiming_normal_(
+                        fmodel._parameters["weight"][cls_idx].unsqueeze(0)
+                    )
                 elif reset_head == "glorot":
-                    torch.nn.init.xavier_uniform_(fmodel._parameters["weight"][cls_idx].unsqueeze(0))
+                    torch.nn.init.xavier_uniform_(
+                        fmodel._parameters["weight"][cls_idx].unsqueeze(0)
+                    )
                 else:
                     raise NameError(f"Reset head {reset_head} unknown")
-
-            # print(fmodel)
-            # print(cls_idxs)
-            # print(fmodel._parameters["weight"])
-            # print(fmodel._parameters["weight"].size())
-            # print(fmodel._parameters["weight"][cls_idxs])
-            # print(fmodel._parameters["weight"][cls_idxs].size())
-            # print(y_spt)
-
-            # sys.exit()
 
             features, _ = model(x_spt[task_num], is_feat=True)
             feat = features[-1]
@@ -758,19 +811,6 @@ def train_step(
             fia += _fia
 
         counter += 1
-
-    # iia = iia / counter
-    # fia = fia / counter
-    # iil = iil / counter
-    # fil = fil / counter
-    # ioa = ioa / counter
-    # foa = foa / counter
-    # iol = iol / counter
-    # fol = fol / counter
-
-    # fol.backward()
-    # outer_opt.step()
-    # outer_opt.zero_grad()
 
     return dict(
         iia=iia,  # .detach(),
