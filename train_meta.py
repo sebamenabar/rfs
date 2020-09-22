@@ -9,7 +9,8 @@ from comet_ml import Experiment
 import higher
 from tqdm import tqdm
 
-import tensorboard_logger as tb_logger
+# import tensorboard_logger as tb_logger
+from tensorboardX import SummaryWriter
 import torch
 import torch.optim as optim
 import torch.nn as nn
@@ -354,7 +355,8 @@ def main():
         model.classifier.parameters(),
         lr=opt.inner_lr,
     )
-    logger = tb_logger.Logger(logdir=opt.tb_folder, flush_secs=2)
+    logger = SummaryWriter(logdir=opt.tb_folder, flush_secs=10, comment=opt.model_name)
+    # logger.add_hparams(dict(vars(opt)))
     comet_logger = Experiment(
         api_key=os.environ["COMET_API_KEY"],
         project_name=opt.comet_project_name,
@@ -444,10 +446,10 @@ def main():
             print(f"MAML 5-way-5-shot accuracy: {val_acc.item()}")
             print(f"LR 5-way-5-shot accuracy: {val_acc_feat}+-{val_std_feat}")
 
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
+            if val_acc_feat > best_val_acc:
+                best_val_acc = val_acc_feat
                 print(
-                    f"New best validation accuracy {val_acc.item()} saving checkpoints\n"
+                    f"New best validation accuracy {best_val_acc.item()} saving checkpoints\n"
                 )
                 # print(val_acc.item())
 
@@ -476,9 +478,9 @@ def main():
                 prefix="val",
             )
 
-            logger.log_value("val_acc", val_acc, step)
-            logger.log_value("val_loss", val_loss, step)
-            logger.log_value("val_acc_lr", val_acc_feat, step)
+            logger.add_scalar("val_acc", val_acc, step)
+            logger.add_scalar("val_loss", val_loss, step)
+            logger.add_scalar("val_acc_lr", val_acc_feat, step)
 
         if (step == 1) or (step % opt.eval_freq == 0) or (step % opt.print_freq == 0):
 
@@ -494,8 +496,8 @@ def main():
                 prefix="train",
             )
 
-            logger.log_value("train_acc", info["foa"], step)
-            logger.log_value("train_loss", info["fol"], step)
+            logger.add_scalar("train_acc", info["foa"], step)
+            logger.add_scalar("train_loss", info["fol"], step)
 
             pbar.set_postfix(
                 # iol=f"{info['iol'].item():.2f}",

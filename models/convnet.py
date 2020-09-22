@@ -2,7 +2,7 @@ from __future__ import print_function
 
 import torch
 import torch.nn as nn
-
+from .resnet import Affine
 
 class ConvNet(nn.Module):
     def __init__(
@@ -12,16 +12,26 @@ class ConvNet(nn.Module):
         initializer="kaiming_normal",
         zero_bias=True,
         weight_norm=False,
+        normalization="bn",
     ):
         super(ConvNet, self).__init__()
 
 
-        if weight_norm:
-            print("Using weight norm and group norm")
-            normalization = lambda: nn.GroupNorm(2, 64)
-        else:
-            print("Track stats", track_stats)
+        # if weight_norm:
+        #     print("Using weight norm and group norm")
+        #     normalization = lambda: nn.GroupNorm(2, 64)
+        # else:
+        #     print("Track stats", track_stats)
+        #     normalization = lambda: nn.BatchNorm2d(64, track_running_stats=track_stats)
+
+        if normalization == "bn":
             normalization = lambda: nn.BatchNorm2d(64, track_running_stats=track_stats)
+        elif normalization == "affine":
+            normalization = lambda: Affine(64)
+        elif normalization == "instance":
+            normalization = lambda: nn.InstanceNorm2d(64)
+        elif normalization == "layer":
+            normalization = lambda: nn.LayerNorm()
 
         self.layer1 = nn.Sequential(
             nn.Conv2d(3, 64, kernel_size=3, padding=1),

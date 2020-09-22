@@ -51,7 +51,7 @@ def parse_option():
 
     # optimization
     parser.add_argument(
-        "--learning_rate", type=float, default=0.001, help="learning rate"
+        "--learning_rate", type=float, default=0.01, help="learning rate"
     )
     parser.add_argument("--inner_lr", type=float, default=0.01, help="learning rate")
     parser.add_argument("--num_inner_steps", type=int, default=5)
@@ -98,7 +98,7 @@ def parse_option():
     parser.add_argument(
         "--n_ways",
         type=int,
-        default=5,
+        default=2,
         metavar="N",
         help="Number of classes for doing each classification run",
     )
@@ -108,12 +108,12 @@ def parse_option():
     parser.add_argument(
         "--n_queries",
         type=int,
-        default=5,
+        default=10,
         metavar="N",
         help="Number of queries in test",
     )
     parser.add_argument(
-        "--n_qry_way", type=int, default=64, metavar="N", help="Number of query in test"
+        "--n_qry_way", type=int, default=32, metavar="N", help="Number of query in test"
     )
     parser.add_argument(
         "--n_qry_shot", type=int, default=2, metavar="N", help="Number of query in test"
@@ -302,6 +302,7 @@ def main():
             shuffle=True,
             drop_last=True,
             num_workers=opt.num_workers,
+            pin_memory=True,
         )
         meta_train_dataset_qry = MetaImageNet(
             args=opt,
@@ -322,6 +323,7 @@ def main():
             shuffle=True,
             drop_last=True,
             num_workers=opt.num_workers,
+            pin_memory=True,
         )
         meta_val_dataset = MetaImageNet(
             args=opt,
@@ -340,6 +342,7 @@ def main():
             shuffle=False,
             drop_last=False,
             num_workers=opt.num_workers,
+            pin_memory=True,
         )
         # if opt.use_trainval:
         #     n_cls = 80
@@ -381,7 +384,7 @@ def main():
         # if opt.n_gpu > 1:
         #     model = nn.DataParallel(model)
         model = model.to(device)
-        criterion = criterion.to(device)
+        # criterion = criterion.to(device)
         cudnn.benchmark = True
     else:
         device = torch.device("cpu")
