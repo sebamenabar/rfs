@@ -373,7 +373,7 @@ def main():
 
     print(model)
 
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
 
     if torch.cuda.is_available():
         print(torch.cuda.get_device_name())
@@ -734,13 +734,14 @@ def train_step(
             acc_history.append(fia)
 
             features, _ = model(x_qry[task_num], is_feat=True)
-            logits = fmodel(features[-1], params=fmodel.parameters(time=0))
-            _iol = nn.functional.cross_entropy(logits, y_qry[task_num])
-            _ioa = (logits.argmax(-1) == y_qry[task_num]).float().mean()
 
             logits = fmodel(features[-1])
             _fol = nn.functional.cross_entropy(logits, y_qry[task_num])
             _foa = (logits.argmax(-1) == y_qry[task_num]).float().mean()
+
+            logits = fmodel(features[-1], params=fmodel.parameters(time=0))
+            _iol = nn.functional.cross_entropy(logits, y_qry[task_num])
+            _ioa = (logits.argmax(-1) == y_qry[task_num]).float().mean()
 
             fol += _fol
 
