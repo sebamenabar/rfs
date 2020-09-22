@@ -126,12 +126,26 @@ class MetaImageNet(ImageNet):
         fix_seed=True,
         fname=None,
         n_test_runs=None,
+        n_ways=None,
+        n_shots=None,
+        n_queries=None,
+        new_labels=True,
     ):
         super().__init__(args, partition, False, fname=fname)
         self.fix_seed = fix_seed
-        self.n_ways = args.n_ways
-        self.n_shots = args.n_shots
-        self.n_queries = args.n_queries
+        self.new_labels = new_labels
+        if n_ways is None:
+            self.n_ways = args.n_ways
+        else: 
+            self.n_ways = n_ways
+        if n_shots is None:
+            self.n_shots = args.n_shots
+        else:
+            self.n_shots = n_shots
+        if n_queries is None:
+            self.n_queries = args.n_queries
+        else:
+            self.n_queries = n_queries
         self.classes = list(self.data.keys())
         if n_test_runs is None:
             self.n_test_runs = args.n_test_runs
@@ -183,11 +197,17 @@ class MetaImageNet(ImageNet):
                 range(imgs.shape[0]), self.n_shots, False
             )
             support_xs.append(imgs[support_xs_ids_sampled])
-            support_ys.append([idx] * self.n_shots)
+            if self.new_labels:
+                support_ys.append([idx] * self.n_shots)
+            else:
+                support_ys.append([cls] * self.n_shots)
             query_xs_ids = np.setxor1d(np.arange(imgs.shape[0]), support_xs_ids_sampled)
             query_xs_ids = np.random.choice(query_xs_ids, self.n_queries, False)
             query_xs.append(imgs[query_xs_ids])
-            query_ys.append([idx] * query_xs_ids.shape[0])
+            if self.new_labels:
+                query_ys.append([idx] * query_xs_ids.shape[0])
+            else:
+                query_ys.append([cls] * query_xs_ids.shape[0])
         support_xs, support_ys, query_xs, query_ys = (
             np.array(support_xs),
             np.array(support_ys),
@@ -208,13 +228,16 @@ class MetaImageNet(ImageNet):
             )
         support_xs = np.split(support_xs, support_xs.shape[0], axis=0)
         query_xs = query_xs.reshape((-1, height, width, channel))
-        query_xs = np.split(query_xs, query_xs.shape[0], axis=0)
+        if query_xs.shape[0]:
+            query_xs = np.split(query_xs, query_xs.shape[0], axis=0)
+            query_xs = torch.stack(
+                list(map(lambda x: self.test_transform(x.squeeze()), query_xs))
+            )
+        # else:
+        #     query_xs = torch.from_numpy(query_xs)
 
         support_xs = torch.stack(
             list(map(lambda x: self.train_transform(x.squeeze()), support_xs))
-        )
-        query_xs = torch.stack(
-            list(map(lambda x: self.test_transform(x.squeeze()), query_xs))
         )
 
         return support_xs, support_ys, query_xs, query_ys

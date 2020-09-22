@@ -29,6 +29,7 @@ from util import adjust_learning_rate, accuracy, AverageMeter
 import numpy as np
 from eval.meta_eval import meta_test
 
+
 def parse_option():
 
     parser = argparse.ArgumentParser("argument for training")
@@ -50,9 +51,9 @@ def parse_option():
 
     # optimization
     parser.add_argument(
-        "--learning_rate", type=float, default=0.01, help="learning rate"
+        "--learning_rate", type=float, default=0.001, help="learning rate"
     )
-    parser.add_argument("--inner_lr", type=float, default=0.1, help="learning rate")
+    parser.add_argument("--inner_lr", type=float, default=0.01, help="learning rate")
     parser.add_argument("--num_inner_steps", type=int, default=5)
     parser.add_argument("--num_inner_steps_test", type=int, default=10)
     # parser.add_argument(
@@ -105,7 +106,17 @@ def parse_option():
         "--n_shots", type=int, default=5, metavar="N", help="Number of shots in test"
     )
     parser.add_argument(
-        "--n_queries", type=int, default=15, metavar="N", help="Number of query in test"
+        "--n_queries",
+        type=int,
+        default=5,
+        metavar="N",
+        help="Number of queries in test",
+    )
+    parser.add_argument(
+        "--n_qry_way", type=int, default=64, metavar="N", help="Number of query in test"
+    )
+    parser.add_argument(
+        "--n_qry_shot", type=int, default=2, metavar="N", help="Number of query in test"
     )
     parser.add_argument(
         "--n_aug_support_samples",
@@ -143,9 +154,11 @@ def parse_option():
         choices=["glorot_uniform", "kaiming_normal"],
     )
     parser.add_argument("--track_stats", default=False, action="store_true")
-    parser.add_argument("--reset_head", choices=["none", "zero"])
+    parser.add_argument("--reset_head", choices=["zero", "kaiming", "glorot"])
     parser.add_argument("--weight_norm", default=0, choices=[0, 1], type=int)
-    parser.add_argument("--activation", default="leaky_relu", choices=["relu", "leaky_relu"])
+    parser.add_argument(
+        "--activation", default="leaky_relu", choices=["relu", "leaky_relu"]
+    )
     parser.add_argument("--normalization", default="bn", choices=["bn", "affine"])
 
     parser.add_argument(
@@ -168,7 +181,7 @@ def parse_option():
 
     opt = parser.parse_args()
     # opt.dropblock = not opt.no_dropblock
-    opt.data_aug = False # hard code
+    opt.data_aug = False  # hard code
 
     # if opt.dataset == "CIFAR-FS" or opt.dataset == "FC100":
     #     opt.transform = "D"
@@ -194,7 +207,7 @@ def parse_option():
     print(opt.lr_decay_epochs)
 
     # opt.model_name = "{}_{}_lr_{}_decay_{}_trans_{}_bsz_{}".format(
-    opt.model_name = "maml_{}_{}_olr_{}_ilr_{}_{}w_{}s_{}qs_aug_{}_bsz_{}_reset_{}_{}_{}_{}".format(
+    opt.model_name = "mrcl_{}_{}_olr_{}_ilr_{}_{}w_{}s_{}qs_aug_{}_bsz_{}_reset_{}_{}_{}_{}".format(
         opt.model,
         opt.dataset,
         opt.learning_rate,
@@ -281,9 +294,30 @@ def main():
             fname="miniImageNet_category_split_train_phase_%s.pickle",
             fix_seed=False,
             n_test_runs=10000000,  # big number to never stop
+            new_labels=False,
         )
         meta_trainloader = DataLoader(
             meta_train_dataset,
+            batch_size=sub_batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=opt.num_workers,
+        )
+        meta_train_dataset_qry = MetaImageNet(
+            args=opt,
+            partition="train",
+            train_transform=train_train_trans,
+            test_transform=train_test_trans,
+            fname="miniImageNet_category_split_train_phase_%s.pickle",
+            fix_seed=False,
+            n_test_runs=10000000,  # big number to never stop
+            new_labels=False,
+            n_ways=opt.n_qry_way,
+            n_shots=opt.n_qry_shot,
+            n_queries=0,
+        )
+        meta_trainloader_qry = DataLoader(
+            meta_train_dataset_qry,
             batch_size=sub_batch_size,
             shuffle=True,
             drop_last=True,
@@ -311,7 +345,18 @@ def main():
         #     n_cls = 80
         # else:
         #     n_cls = 64
-        n_cls = opt.n_ways
+        n_cls = len(meta_train_dataset.classes)
+
+    print(n_cls)
+
+    # x_spt, y_spt, x_qry, y_qry = next(iter(meta_trainloader))
+
+    # x_spt2, y_spt2, x_qry2, y_qry2 = next(iter(meta_trainloader_qry))
+
+    # print(x_spt, y_spt, x_qry, y_qry)
+    # print(x_spt2, y_spt2, x_qry2, y_qry2)
+    # print(x_spt.shape, y_spt.shape, x_qry.shape, y_qry.shape)
+    # print(x_spt2.shape, y_spt2.shape, x_qry2.shape, y_qry2.shape)
 
     model = create_model(
         opt.model,
@@ -344,7 +389,7 @@ def main():
     print("Learning rate")
     print(opt.learning_rate)
     optimizer = torch.optim.Adam(
-         model.parameters(),
+        model.parameters(),
         lr=opt.learning_rate,
     )
     # classifier = model.classifier()
@@ -374,10 +419,11 @@ def main():
 
     # routine: supervised pre-training
     data_sampler = iter(meta_trainloader)
+    data_sampler_qry = iter(meta_trainloader_qry)
     pbar = tqdm(
         range(1, opt.num_steps + 1),
         miniters=opt.print_freq,
-        mininterval=10,
+        mininterval=5,
         maxinterval=30,
         ncols=0,
     )
@@ -392,19 +438,30 @@ def main():
 
         foa = 0.0
         fol = 0.0
-        for _ in range(opt.apply_every):
+        ioa = 0.0
+        iil = 0.0
+        fil = 0.0
+        iia = 0.0
+        fia = 0.0
+        for j in range(opt.apply_every):
 
             x_spt, y_spt, x_qry, y_qry = [t.to(device) for t in next(data_sampler)]
+            x_qry2, y_qry2, _, _ = [t.to(device) for t in next(data_sampler_qry)]
             y_spt = y_spt.flatten(1)
+            y_qry2 = y_qry2.flatten(1)
 
-            # if step == 1:
-            #     print(x_spt.size(), y_spt.size(), x_qry.size(), y_qry.size())
+            x_qry = torch.cat((x_spt, x_qry, x_qry2), 1)
+            y_qry = torch.cat((y_spt, y_qry, y_qry2), 1)
+
+            if step == 1 and j == 0:
+                print(x_spt.size(), y_spt.size(), x_qry.size(), y_qry.size())
 
             info = train_step(
                 model,
                 model.classifier,
                 None,
-                inner_opt,
+                # inner_opt,
+                opt.inner_lr,
                 x_spt,
                 y_spt,
                 x_qry,
@@ -415,11 +472,21 @@ def main():
 
             _foa = info["foa"] / opt.batch_size
             _fol = info["fol"] / opt.batch_size
+            _ioa = info["ioa"] / opt.batch_size
+            _iil = info["iil"] / opt.batch_size
+            _fil = info["fil"] / opt.batch_size
+            _iia = info["iia"] / opt.batch_size
+            _fia = info["fia"] / opt.batch_size
 
             _fol.backward()
 
             foa += _foa.detach()
             fol += _fol.detach()
+            ioa += _ioa.detach()
+            iil += _iil.detach()
+            fil += _fil.detach()
+            iia += _iia.detach()
+            fia += _fia.detach()
 
         optimizer.step()
         optimizer.zero_grad()
@@ -435,7 +502,9 @@ def main():
                 num_inner_steps=opt.num_inner_steps_test,
                 device=device,
             )
-            val_acc_feat, val_std_feat = meta_test(model, meta_valloader, use_logit=False)
+            val_acc_feat, val_std_feat = meta_test(
+                model, meta_valloader, use_logit=False
+            )
 
             val_acc = val_info["outer"]["acc"].cpu()
             val_loss = val_info["outer"]["loss"].cpu()
@@ -461,7 +530,7 @@ def main():
                         "step": step,
                         "val_acc": val_acc,
                         "val_loss": val_loss,
-                        "val_acc_lr": val_acc_feat
+                        "val_acc_lr": val_acc_feat,
                     },
                     os.path.join(opt.save_folder, "{}_best.pth".format(opt.model)),
                 )
@@ -484,11 +553,21 @@ def main():
 
             tfol = fol.cpu()
             tfoa = foa.cpu()
+            tioa = ioa.cpu()
+            tiil = iil.cpu()
+            tfil = fil.cpu()
+            tiia = iia.cpu()
+            tfia = fia.cpu()
 
             comet_logger.log_metrics(
                 dict(
                     fol=tfol,
                     foa=tfoa,
+                    ioa=tfoa,
+                    iil=tiil,
+                    fil=tfil,
+                    iia=tiia,
+                    fia=tfia,
                 ),
                 step=step,
                 prefix="train",
@@ -502,6 +581,9 @@ def main():
                 fol=f"{tfol.item():.2f}",
                 # ioa=f"{info['ioa'].item():.2f}",
                 foa=f"{tfoa.item():.2f}",
+                ioa=f"{tioa.item():.2f}",
+                iia=f"{tiia.item():.2f}",
+                fia=f"{tfia.item():.2f}",
                 vl=f"{val_loss.item():.2f}",
                 va=f"{val_acc.item():.2f}",
                 valr=f"{val_acc_feat:.2f}",
@@ -512,7 +594,6 @@ def main():
                 # counter=info["counter"],
                 refresh=True,
             )
-
 
     # save the last model
     state = {
@@ -566,7 +647,7 @@ def train_step(
     model,
     classifier,
     outer_opt,
-    inner_opt,
+    inner_opt_lr,
     x_spt,
     y_spt,
     x_qry,
@@ -575,12 +656,12 @@ def train_step(
     cls_indexes=None,
     num_steps=5,
 ):
-    if reset_head == "zero":
-        # print("Resetting head")
-        nn.init.zeros_(classifier.weight)
-        # print(classifier.weight)
+    # if reset_head == "zero":
+    # print("Resetting head")
+    # nn.init.zeros_(classifier.weight)
+    # print(classifier.weight)
 
-    # outer_opt.zero_grad()
+    #  outer_opt.zero_grad()
 
     # total_loss = 0.
     counter = 0
@@ -600,7 +681,36 @@ def train_step(
         # print(fia)
         # print(fil)
 
-        with higher.innerloop_ctx(classifier, inner_opt, copy_initial_weights=False) as (fmodel, diffopt):
+        inner_opt = torch.optim.SGD(classifier.parameters(), lr=inner_opt_lr)
+
+        with higher.innerloop_ctx(
+            classifier, inner_opt, copy_initial_weights=False,
+        ) as (fmodel, diffopt):
+
+
+            cls_idxs = torch.unique(y_spt[task_num])
+
+            for cls_idx in cls_idxs:
+                if reset_head == "zero":
+                    # print("resetting zero")
+                    torch.nn.init.zeros_(fmodel._parameters["weight"][cls_idx].unsqueeze(0))
+                elif reset_head == "kaiming":
+                    torch.nn.init.kaiming_normal_(fmodel._parameters["weight"][cls_idx].unsqueeze(0))
+                elif reset_head == "glorot":
+                    torch.nn.init.xavier_uniform_(fmodel._parameters["weight"][cls_idx].unsqueeze(0))
+                else:
+                    raise NameError(f"Reset head {reset_head} unknown")
+
+            # print(fmodel)
+            # print(cls_idxs)
+            # print(fmodel._parameters["weight"])
+            # print(fmodel._parameters["weight"].size())
+            # print(fmodel._parameters["weight"][cls_idxs])
+            # print(fmodel._parameters["weight"][cls_idxs].size())
+            # print(y_spt)
+
+            # sys.exit()
+
             features, _ = model(x_spt[task_num], is_feat=True)
             feat = features[-1]
 
@@ -623,7 +733,8 @@ def train_step(
             loss_history.append(nn.functional.cross_entropy(logits, y_spt[task_num]))
             acc_history.append(fia)
 
-            features, logits = model(x_qry[task_num], is_feat=True)
+            features, _ = model(x_qry[task_num], is_feat=True)
+            logits = fmodel(features[-1], params=fmodel.parameters(time=0))
             _iol = nn.functional.cross_entropy(logits, y_qry[task_num])
             _ioa = (logits.argmax(-1) == y_qry[task_num]).float().mean()
 
@@ -658,14 +769,14 @@ def train_step(
     # outer_opt.zero_grad()
 
     return dict(
-        iia=iia, # .detach(),
-        fia=fia, # .detach(),
-        iil=iil, # .detach(),
-        fil=fil, # .detach(),
-        ioa=ioa, # .detach(),
-        foa=foa, # .detach(),
-        iol=iol, # .detach(),
-        fol=fol, # .detach(),
+        iia=iia,  # .detach(),
+        fia=fia,  # .detach(),
+        iil=iil,  # .detach(),
+        fil=fil,  # .detach(),
+        ioa=ioa,  # .detach(),
+        foa=foa,  # .detach(),
+        iol=iol,  # .detach(),
+        fol=fol,  # .detach(),
         # counter=counter,
     )
 
@@ -683,8 +794,12 @@ def test_run(loader, encoder, classifier, inner_opt, num_inner_steps=10, device=
         x_spt, y_spt, x_qry, y_qry = [t[0].to(device) for t in next(loader)]
         y_spt = y_spt.flatten()
 
-        with higher.innerloop_ctx(classifier, inner_opt, track_higher_grads=False) as (fmodel, diffopt):
-
+        with higher.innerloop_ctx(classifier, inner_opt, track_higher_grads=False) as (
+            fmodel,
+            diffopt,
+        ):
+            torch.nn.init.zeros_(fmodel._parameters["weight"])
+            torch.nn.init.zeros_(fmodel._parameters["bias"])
             with torch.no_grad():
                 features, _ = encoder(x_spt, is_feat=True)
             feat = features[-1]
